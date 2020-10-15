@@ -1,16 +1,26 @@
-import urllib.request
-import json
+#!/usr/bin/python3
+
+import argparse
+import http.server
+import socketserver
+import sys
 import time
 
+import requests
+
+openhab_hostname = None
+openhab_port = None
 
 def get_metrics():
-    url = urllib.request.urlopen('http://127.0.0.1:8080/rest/items?recursive=false&fields=name,state,type')
-    content_bytes = url.read()
-    content = content_bytes.decode('utf-8')
 
-    url.close()
+    payload = {
+        'recursive': 'false',
+        'fields': 'name,state,type',
+    }
+    with requests.Session() as metrics_session:
+        resp = metrics_session.get(url=f'http://{openhab_hostname}:{openhab_port}/rest/items', params=payload)
 
-    obj = json.loads(content)
+    obj = resp.json()
     ts = int(round(time.time() * 1000))
 
     numbers = [ item for item in obj if item['type'].lower() == 'number' ]
@@ -24,13 +34,13 @@ def get_metrics():
     res = res + print_metrics(switches, 'switch', ts)
     res = res + print_metrics(contacts, 'contact', ts)
 
-    return res
+    return res.encode('utf-8')
 
 
-def print_metrics(metrics, type, timestamp):
-    metric_name = 'openhab2_metric_' + type
+def print_metrics(metrics, itype, timestamp):
+    metric_name = f'openhab2_metric_{itype}'
 
-    res = '# TYPE {} gauge\n'.format(metric_name)
+    res = f'# TYPE {metric_name} gauge\n'
 
     for metric in metrics:
         name = metric['name']
@@ -48,17 +58,27 @@ def print_metrics(metrics, type, timestamp):
 
     return res
 
+class OpenHABMetricsHandler(http.server.BaseHTTPRequestHandler):
 
-def app(environ, start_response):
-    """
-    Entrypoint for gunicorn
-    """
-    metrics = get_metrics()
-    data = metrics.encode('utf-8')
+    def do_GET(self):
+        content = get_metrics()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
 
-    start_response('200 OK', [
-        ('Content-Type', 'text/plain'),
-        ('Content-Length', str(len(data)))
-        ])
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='OpenHAB2 Metrics Exporter (Prometheus).')
+    parser.add_argument('listen_port', help='Endpoint of this metrics exporter')
+    parser.add_argument('--openhab_hostname', default='localhost', help='Hostname of the openhab server')
+    parser.add_argument('--openhab_port', default='8080', help='Port where OpenHAB2 listens')
 
-    return iter([data])
+    args = parser.parse_args()
+
+    openhab_hostname = args.openhab_hostname
+    openhab_port = args.openhab_port
+
+    with socketserver.TCPServer(("", int(args.listen_port)), OpenHABMetricsHandler) as httpd:
+        print("serving at port", args.listen_port)
+        httpd.serve_forever()
